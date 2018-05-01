@@ -27,6 +27,7 @@
 #include <mutex>
 #include <vector>
 #include <set>
+#include <chrono>
 
 #include <fastrtps/log/Log.h>
 
@@ -93,7 +94,7 @@ bool StatelessWriter::change_removed_by_history(CacheChange_t* change)
 {
     std::lock_guard<std::recursive_mutex> guard(*mp_mutex);
 
-    for(auto& reader_locator : reader_locators)
+    for(auto& reader_locator : reader_locators) {
         reader_locator.unsent_changes.erase(std::remove_if(
                     reader_locator.unsent_changes.begin(),
                     reader_locator.unsent_changes.end(),
@@ -103,7 +104,7 @@ bool StatelessWriter::change_removed_by_history(CacheChange_t* change)
                             cptr.getChange()->sequenceNumber == change->sequenceNumber;
                     }),
                     reader_locator.unsent_changes.end());
-
+    }
     return true;
 }
 
@@ -123,20 +124,49 @@ void StatelessWriter::update_unsent_changes(ReaderLocator& reader_locator,
         {
             it->markFragmentsAsSent(fragNum);
             FragmentNumberSet_t fragment_sns = it->getUnsentFragments();
-            if(fragment_sns.isSetEmpty())
+            if(fragment_sns.isSetEmpty()) {
                 reader_locator.unsent_changes.erase(it);
+            }
         }
-        else
+        else {
             reader_locator.unsent_changes.erase(it);
+        }
     }
 }
 
+thread_local std::chrono::time_point<std::chrono::system_clock> lastSendTime = std::chrono::system_clock::now();
+unsigned  int doof=0;
+constexpr int cutover=10000;
+    
 void StatelessWriter::send_any_unsent_changes()
 {
     std::lock_guard<std::recursive_mutex> guard(*mp_mutex);
 
     RTPSWriterCollector<ReaderLocator*> changesToSend;
 
+    std::chrono::time_point<std::chrono::system_clock> timeNow = std::chrono::system_clock::now();
+
+    if (++doof > cutover) {
+        if (doof==(cutover+1)) std::cout << "===========================================================\n";
+        unsigned int changeCount = 0;
+        for(auto& reader_locator : reader_locators)    {
+            changeCount += reader_locator.unsent_changes.size();
+        }
+        
+        if (changeCount==0) {
+            return;
+        }
+        if (changeCount<64) {
+            auto deltaTime = timeNow - lastSendTime;
+            if (deltaTime < std::chrono::milliseconds(100)) {
+                return;
+            }
+        }
+    }
+
+    
+    lastSendTime = timeNow;    
+    
     for(auto& reader_locator : reader_locators)
     {
         for(auto unsentChange : reader_locator.unsent_changes)
@@ -250,6 +280,7 @@ bool StatelessWriter::matched_reader_add(const RemoteReaderAttributes& rdata)
 
 bool StatelessWriter::add_locator(Locator_t& loc)
 {
+ 
 #if HAVE_SECURITY
     if(!is_submessage_protected() && !is_payload_protected())
 #endif
